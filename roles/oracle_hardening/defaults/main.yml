@@ -1,0 +1,51 @@
+---
+oracle_os_user: oracle
+oracle_home: /u01/app/oracle/product/19c/dbhome_1
+oracle_sid: ORCL
+
+# ---- DB-01 sqlnet.ora network encryption and integrity (CIS Oracle 19c 2.2.x) ----
+# Every client must reconnect to negotiate; plan an application restart and
+# test on a non-production copy first. With Data Guard apply on primary AND
+# standby (redo transport is a client too).
+oracle_sqlnet_encryption: false
+oracle_sqlnet_settings:
+  SQLNET.ENCRYPTION_SERVER: REQUIRED
+  SQLNET.ENCRYPTION_CLIENT: REQUIRED
+  SQLNET.ENCRYPTION_TYPES_SERVER: (AES256)
+  SQLNET.ENCRYPTION_TYPES_CLIENT: (AES256)
+  SQLNET.CRYPTO_CHECKSUM_SERVER: REQUIRED
+  SQLNET.CRYPTO_CHECKSUM_CLIENT: REQUIRED
+  SQLNET.CRYPTO_CHECKSUM_TYPES_SERVER: (SHA256,SHA384,SHA512)
+  SQLNET.CRYPTO_CHECKSUM_TYPES_CLIENT: (SHA256,SHA384,SHA512)
+# Minimum logon version. 12a refuses accounts that only have 10g/11g verifiers;
+# check dba_users.password_versions first.
+oracle_sqlnet_logon_version: false
+oracle_sqlnet_logon_version_value: 12a
+
+# ---- DB-02 Refuse MD5/SHA-1 certificates (no runtime effect without TCPS) ----
+oracle_sqlnet_reject_weak_certs: true
+
+# ---- DB-03 Password verify function on DEFAULT profile (CIS 3.x) ----
+oracle_password_verify: true
+oracle_password_verify_profile: DEFAULT
+oracle_password_verify_function: ORA12C_VERIFY_FUNCTION
+
+# ---- DB-04 Protocol error trace action ----
+oracle_sec_protocol_error_trace_action: LOG
+
+# ---- DB-05 Unified audit policies (CIS 5.x) ----
+oracle_audit_policies:
+  - ORA_LOGON_FAILURES
+  - ORA_SECURECONFIG
+# Add ORA_CIS_RECOMMENDATIONS where the release update ships it.
+
+# ---- DB-06 Revoke ANY / PUBLIC synonym privileges from application schemas ----
+# Confirm with the application vendor that they are install-time only.
+oracle_revoke_privileges: []
+#  - { grantee: APPOWNER, privilege: CREATE ANY SYNONYM }
+#  - { grantee: APPOWNER, privilege: DROP ANY SYNONYM }
+#  - { grantee: APPOWNER, privilege: CREATE PUBLIC SYNONYM }
+#  - { grantee: APPOWNER, privilege: DROP PUBLIC SYNONYM }
+
+# ---- DB-07 Restrictive mode on config files that hold DB credentials ----
+oracle_secret_files: []             # e.g. [{path: /etc/app/db.conf, mode: "0640", group: appgrp}]

@@ -1,0 +1,19 @@
+---
+# Global settings. Every role also has its own defaults in roles/<role>/defaults/main.yml;
+# override per group or host in your own (git-ignored) inventory.
+#
+# Safety switches. Defaults make a run change config files only, never restart
+# a service. Turn allow_restart on per host, in a window, one node at a time.
+
+# Restart or reload services after a config change (sshd, rsyslog, haproxy,
+# tomcat, postgresql). false = files change, the service picks it up at its
+# next planned restart. Run playbooks/04_verify.yml afterwards either way.
+allow_restart: false
+
+# Set true on hosts that run Docker (published ports need IPv4 forwarding).
+# The example inventory sets it for [docker_hosts].
+docker_host: false
+
+# Passwords never go in this file. Put them in an ansible-vault file
+# (e.g. group_vars/all.vault.yml, git-ignored) and reference them by name:
+#   vault_mysql_root_password: <set with ansible-vault edit>

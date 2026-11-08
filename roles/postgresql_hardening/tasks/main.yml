@@ -1,0 +1,186 @@
+---
+- name: "Desired parameters"
+  ansible.builtin.set_fact:
+    _pg_want: >-
+      {{ {} | combine(pg_logging_params if pg_logging | bool else {})
+            | combine(pg_tls_params if pg_tls | bool else {})
+            | combine({'shared_preload_libraries': 'passwordcheck'} if pg_passwordcheck | bool else {}) }}
+
+- name: "Is this node the primary / leader?"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select pg_is_in_recovery()"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  register: _pg_recovery
+  changed_when: false
+  check_mode: false
+
+- name: "Current values"
+  ansible.builtin.command:
+    argv:
+      - "{{ pg_bin_dir }}/psql"
+      - -h
+      - "{{ pg_socket_dir }}"
+      - -At
+      - -F
+      - "|"
+      - -c
+      - "select name, setting from pg_settings where name = any(string_to_array('{{ _pg_want.keys() | join(',') }}', ','))"
+  become: true
+  become_user: "{{ pg_os_user }}"
+  register: _pg_cur
+  changed_when: false
+  check_mode: false
+  when: _pg_want | length > 0
+
+- name: "Current values as a dict"
+  ansible.builtin.set_fact:
+    _pg_cur_dict: "{{ dict(_pg_cur.stdout_lines | default([]) | map('regex_findall', '^([^|]*)[|](.*)$') | map('first') | list) }}"
+    _pg_diff: {}
+
+- name: "Parameters that differ"
+  ansible.builtin.set_fact:
+    _pg_diff: "{{ _pg_diff | combine({item.key: item.value}) }}"
+  loop: "{{ _pg_want | dict2items }}"
+  when: (_pg_cur_dict[item.key] | default('') | string) != (item.value | string)
+
+- name: "Show planned parameter changes"
+  ansible.builtin.debug:
+    var: _pg_diff
+
+# Standalone: ALTER SYSTEM on the primary ------------------------------------
+- name: "DB-10/11/12 ALTER SYSTEM (standalone primary)"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -v, ON_ERROR_STOP=1, -c, "ALTER SYSTEM SET {{ item.key }} = '{{ item.value }}'"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  loop: "{{ _pg_diff | dict2items }}"
+  when:
+    - not (pg_patroni | bool)
+    - _pg_recovery.stdout == 'f'
+  changed_when: true
+  register: _pg_altered
+
+# Patroni: DCS, leader only ----------------------------------------------------
+- name: "Patroni edit-config arguments"
+  ansible.builtin.set_fact:
+    _pg_patroni_args: [patronictl, -c, "{{ pg_patroni_config }}", edit-config, --force]
+  when: pg_patroni | bool
+
+- name: "Patroni edit-config arguments: one -s per parameter"
+  ansible.builtin.set_fact:
+    _pg_patroni_args: "{{ _pg_patroni_args + ['-s', 'postgresql.parameters.' ~ item.key ~ '=' ~ item.value] }}"
+  loop: "{{ _pg_diff | dict2items }}"
+  when: pg_patroni | bool
+
+- name: "DB-10/11/12 patronictl edit-config (leader only)"
+  ansible.builtin.command:
+    argv: "{{ _pg_patroni_args }}"
+  when:
+    - pg_patroni | bool
+    - _pg_recovery.stdout == 'f'
+    - _pg_diff | length > 0
+  changed_when: true
+  register: _pg_patroni_edit
+
+- name: "Reload configuration (standalone)"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select pg_reload_conf()"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  when: _pg_altered is changed  # noqa: no-handler  (reload must happen before the pending-restart check)
+  changed_when: true
+
+- name: "Pending restart?"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select string_agg(name, ',') from pg_settings where pending_restart"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  register: _pg_pending
+  changed_when: _pg_pending.stdout | length > 0
+  check_mode: false
+  notify: Restart required
+
+# DB-13 pg_hba local trust -------------------------------------------------------
+- name: "DB-13 Remove local trust from pg_hba.conf"
+  when: pg_remove_local_trust | bool
+  block:
+    - name: "DB-13 hba_file location"
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "show hba_file"]
+      become: true
+      become_user: "{{ pg_os_user }}"
+      register: _hba_file
+      changed_when: false
+      check_mode: false
+
+    - name: "DB-13 Backup"
+      ansible.builtin.copy:
+        src: "{{ _hba_file.stdout }}"
+        dest: "{{ _hba_file.stdout }}.before-hardening"
+        remote_src: true
+        force: false
+        owner: "{{ pg_os_user }}"
+        mode: "0600"
+
+    - name: "DB-13 local trust -> peer"
+      ansible.builtin.replace:
+        path: "{{ _hba_file.stdout }}"
+        regexp: '^(\s*local\s+(?:all|replication)\s+all\s+)trust\s*$'
+        replace: '\1peer'
+      register: _hba_peer
+
+    - name: "DB-13 Remove loopback trust lines"
+      ansible.builtin.lineinfile:
+        path: "{{ _hba_file.stdout }}"
+        regexp: '^\s*host\s+(all|replication)\s+all\s+(127\.0\.0\.1/32|::1/128)\s+trust\s*$'
+        state: absent
+      register: _hba_host
+
+    - name: "DB-13 Parse errors in new file"
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select count(*) from pg_hba_file_rules where error is not null"]
+      become: true
+      become_user: "{{ pg_os_user }}"
+      register: _hba_err
+      changed_when: false
+      failed_when: _hba_err.stdout != '0'
+      when: _hba_peer is changed or _hba_host is changed
+
+    - name: "DB-13 Reload"
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select pg_reload_conf()"]
+      become: true
+      become_user: "{{ pg_os_user }}"
+      when: _hba_peer is changed or _hba_host is changed
+      changed_when: true
+
+    - name: "DB-13 Local peer login still works"
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select 'socket_ok'"]
+      become: true
+      become_user: "{{ pg_os_user }}"
+      register: _hba_login
+      changed_when: false
+      failed_when: _hba_login.stdout != 'socket_ok'
+      when: _hba_peer is changed or _hba_host is changed
+
+  rescue:
+    - name: "DB-13 ROLLBACK: restore pg_hba.conf"
+      ansible.builtin.copy:
+        src: "{{ _hba_file.stdout }}.before-hardening"
+        dest: "{{ _hba_file.stdout }}"
+        remote_src: true
+        owner: "{{ pg_os_user }}"
+        mode: "0600"
+
+    - name: "DB-13 ROLLBACK: reload with pg_ctl (socket login may be broken)"
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/pg_ctl", reload, -D, "{{ _hba_file.stdout | dirname }}"]
+      become: true
+      become_user: "{{ pg_os_user }}"
+      changed_when: true
+
+    - name: "DB-13 ROLLBACK done, stop here"
+      ansible.builtin.fail:
+        msg: "pg_hba change rolled back on {{ inventory_hostname }}; see the task output above."

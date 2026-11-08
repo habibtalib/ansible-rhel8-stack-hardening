@@ -1,0 +1,31 @@
+---
+- name: "DB-30 Is the MongoDB port published on the host?"
+  ansible.builtin.command:
+    argv: [docker, port, "{{ mongodb_container }}"]
+  register: _mongo_port
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: "DB-30 Is authorization enabled?"
+  ansible.builtin.command:
+    argv: [docker, inspect, --format, "{{ '{{json .Config.Cmd}} {{json .Args}}' }}", "{{ mongodb_container }}"]
+  register: _mongo_cmd
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: "DB-30 Report"
+  ansible.builtin.debug:
+    msg:
+      - "published: {{ (_mongo_port.stdout | length > 0) | ternary(_mongo_port.stdout_lines, 'no (internal network only)') }}"
+      - "auth flag in command: {{ ('--auth' in _mongo_cmd.stdout) | ternary('yes', 'no') }}"
+      - "No auth + unpublished port: document as an exception (docs/EXCEPTIONS.md)."
+      - "Auditing needs MongoDB Enterprise; Community images cannot pass that check."
+
+- name: "DB-31 Tighten MongoDB data directory mode"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "{{ mongodb_data_dir_mode }}"
+  loop: "{{ mongodb_data_dirs }}"

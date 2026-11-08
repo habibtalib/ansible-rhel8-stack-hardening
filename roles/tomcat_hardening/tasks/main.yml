@@ -1,0 +1,99 @@
+---
+- name: "server.xml present"
+  ansible.builtin.stat:
+    path: "{{ tomcat_server_xml }}"
+  register: _srvxml
+  failed_when: not _srvxml.stat.exists
+
+- name: "Backup server.xml (once per run)"
+  ansible.builtin.copy:
+    src: "{{ tomcat_server_xml }}"
+    dest: "{{ tomcat_server_xml }}.before-hardening"
+    remote_src: true
+    force: false
+    mode: preserve
+
+- name: "ErrorReportValve already configured outside this kit?"
+  ansible.builtin.shell: |
+    set -o pipefail
+    sed '/ansible-rhel8-stack-hardening WEB-01/,/ansible-rhel8-stack-hardening WEB-01/d' {{ tomcat_server_xml | quote }} \
+      | grep -c 'ErrorReportValve' || true
+  args:
+    executable: /bin/bash
+  register: _valve_existing
+  changed_when: false
+  check_mode: false
+
+- name: "Config changes"
+  block:
+    - name: "WEB-01 ErrorReportValve inside <Host>"
+      ansible.builtin.blockinfile:
+        path: "{{ tomcat_server_xml }}"
+        marker: "<!-- {mark} ansible-rhel8-stack-hardening WEB-01 -->"
+        insertbefore: '^\s*</Host>'
+        block: |
+                  <Valve className="org.apache.catalina.valves.ErrorReportValve" showReport="false" showServerInfo="false" />
+      when:
+        - tomcat_error_valve | bool
+        - _valve_existing.stdout | trim == '0'
+      register: _valve
+
+    - name: "WEB-02 Comment out active AJP connector"
+      ansible.builtin.replace:
+        path: "{{ tomcat_server_xml }}"
+        regexp: '(?<!<!-- AJP disabled by ansible-rhel8-stack-hardening )(<Connector\b[^>]*protocol="AJP/1\.3"[^>]*/>)'
+        replace: '<!-- AJP disabled by ansible-rhel8-stack-hardening \1 -->'
+      when: tomcat_disable_ajp | bool
+      register: _ajp
+
+    - name: "server.xml is well-formed"
+      ansible.builtin.command:
+        argv: [xmllint, --noout, "{{ tomcat_server_xml }}"]
+      changed_when: false
+      check_mode: false
+      when: _valve is changed or _ajp is changed
+
+    - name: "Restart Tomcat (allow_restart only)"
+      ansible.builtin.systemd:
+        name: "{{ tomcat_service }}"
+        state: restarted
+      when:
+        - allow_restart | bool
+        - _valve is changed or _ajp is changed
+
+    - name: "Tomcat answers after restart"
+      ansible.builtin.uri:
+        url: "{{ tomcat_health_url }}"
+        status_code: "{{ tomcat_health_status }}"
+      register: _health
+      retries: "{{ tomcat_health_retries }}"
+      delay: "{{ tomcat_health_delay }}"
+      until: _health is succeeded
+      when:
+        - allow_restart | bool
+        - _valve is changed or _ajp is changed
+
+  rescue:
+    - name: "ROLLBACK server.xml"
+      ansible.builtin.copy:
+        src: "{{ tomcat_server_xml }}.before-hardening"
+        dest: "{{ tomcat_server_xml }}"
+        remote_src: true
+        mode: preserve
+
+    - name: "ROLLBACK restart"
+      ansible.builtin.systemd:
+        name: "{{ tomcat_service }}"
+        state: restarted
+      when: allow_restart | bool
+
+    - name: "ROLLBACK done, stop here"
+      ansible.builtin.fail:
+        msg: "Tomcat change rolled back on {{ inventory_hostname }}."
+
+- name: "Restart pending"
+  ansible.builtin.debug:
+    msg: "server.xml changed; takes effect at the next planned restart of {{ tomcat_service }}."
+  when:
+    - not (allow_restart | bool)
+    - _valve is changed or _ajp is changed

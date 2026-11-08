@@ -1,0 +1,21 @@
+---
+- name: "DB-10 Logging parameters live"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "show {{ item.key }}"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  loop: "{{ pg_logging_params | dict2items }}"
+  register: _pgv
+  changed_when: false
+  when: pg_logging | bool
+  failed_when: _pgv.stdout != item.value | string
+
+- name: "DB-13 No trust lines left"
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_socket_dir }}", -At, -c, "select count(*) from pg_hba_file_rules where auth_method = 'trust'"]
+  become: true
+  become_user: "{{ pg_os_user }}"
+  register: _trust
+  changed_when: false
+  when: pg_remove_local_trust | bool
+  failed_when: _trust.stdout != '0'

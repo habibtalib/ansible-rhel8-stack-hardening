@@ -1,0 +1,8 @@
+---
+# Kept here as plain YAML data (not Jinja string literals) so the regex
+# backslashes reach haproxy.cfg unchanged on every ansible-core version.
+_haproxy_rule_secure: >-
+  http-response replace-header Set-Cookie '^((?:(?!;\s*[Ss]ecure).)*)$' '\1; Secure'
+_haproxy_rule_httponly: >-
+  http-response replace-header Set-Cookie
+  '^((?!(?:{{ haproxy_httponly_exclude | join('|') }})=)(?:(?!;\s*[Hh]ttp[Oo]nly).)*)$' '\1; HttpOnly'

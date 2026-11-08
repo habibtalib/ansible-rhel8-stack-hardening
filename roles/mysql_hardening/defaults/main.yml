@@ -1,0 +1,11 @@
+---
+# MySQL 8.x running in a Docker container on the host.
+mysql_container: mysql
+mysql_admin_user: root
+# Password comes from an ansible-vault variable; never set it here.
+mysql_admin_password: "{{ vault_mysql_root_password | default('') }}"
+
+# ---- DB-20 validate_password component (CIS MySQL 7.x) ----
+mysql_validate_password: false
+mysql_validate_password_policy: MEDIUM
+mysql_validate_password_length: 14

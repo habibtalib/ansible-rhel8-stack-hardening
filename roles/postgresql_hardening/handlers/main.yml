@@ -1,0 +1,7 @@
+---
+- name: Restart required
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: a parameter needs a restart (pending_restart=true).
+      Standalone: systemctl restart {{ pg_service }}. Patroni: patronictl restart
+      <cluster> <member> one member at a time, replicas first, then switchover.

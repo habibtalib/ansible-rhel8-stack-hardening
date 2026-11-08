@@ -1,0 +1,51 @@
+---
+- name: "Frontend exists exactly once"
+  ansible.builtin.command:
+    argv: [grep, -cE, "^frontend[[:space:]]+{{ haproxy_frontend_name }}([[:space:]]|$)", "{{ haproxy_cfg }}"]
+  register: _fe
+  changed_when: false
+  check_mode: false
+  failed_when: _fe.stdout | trim != '1'
+
+- name: "WEB-10..13 Header lines"
+  ansible.builtin.set_fact:
+    _hdr_lines: >-
+      {{ (['http-response set-header Strict-Transport-Security "' ~ haproxy_hsts_value ~ '"'] if haproxy_hsts | bool else [])
+         + (['http-response set-header X-Content-Type-Options nosniff',
+             'http-response set-header X-Frame-Options ' ~ haproxy_frame_options] if haproxy_basic_headers | bool else [])
+         + (['http-response set-header Content-Security-Policy "' ~ haproxy_csp_value ~ '"'] if haproxy_csp | bool else [])
+         + ([_haproxy_rule_secure] if haproxy_cookie_secure | bool else [])
+         + ([_haproxy_rule_httponly] if haproxy_cookie_httponly | bool else []) }}
+
+- name: "WEB-10..13 Security headers inside the existing frontend"
+  ansible.builtin.blockinfile:
+    path: "{{ haproxy_cfg }}"
+    marker: "    # {mark} ansible-rhel8-stack-hardening headers"
+    insertafter: "^frontend\\s+{{ haproxy_frontend_name }}(\\s|$)"
+    validate: haproxy -c -f %s
+    backup: true
+    block: |
+      {% for l in _hdr_lines %}
+          {{ l }}
+      {% endfor %}
+  notify: Reload haproxy
+
+- name: "Flush handlers before probing"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Probe response headers"
+  ansible.builtin.uri:
+    url: "{{ haproxy_probe_url }}"
+    method: HEAD
+    validate_certs: false
+    status_code: [200, 301, 302, 401, 403, 404]
+  register: _probe
+  check_mode: false
+  when: allow_restart | bool
+
+- name: "Show probed headers"
+  ansible.builtin.debug:
+    msg:
+      hsts: "{{ _probe.strict_transport_security | default('missing') }}"
+      set_cookie: "{{ _probe.set_cookie | default('none') }}"
+  when: allow_restart | bool

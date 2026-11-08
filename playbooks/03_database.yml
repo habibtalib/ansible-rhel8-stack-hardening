@@ -1,0 +1,27 @@
+---
+# Database controls. Oracle DDL runs on the primary only; standbys get sqlnet.ora.
+# PostgreSQL with Patroni: parameters go to the DCS from the leader.
+- name: "03 Oracle"
+  hosts: oracle_hosts
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles: [oracle_hardening]
+
+- name: "03 PostgreSQL"
+  hosts: postgresql_hosts
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles: [postgresql_hardening]
+
+- name: "03 MySQL (container)"
+  hosts: mysql_hosts
+  become: true
+  serial: 1
+  roles: [mysql_hardening]
+
+- name: "03 MongoDB checks (container)"
+  hosts: mongodb_hosts
+  become: true
+  roles: [mongodb_checks]

@@ -1,0 +1,50 @@
+---
+# Read-only. Runs every role in check mode with diff: shows what WOULD change.
+# Nothing is written and nothing restarts, whatever the toggles say.
+- name: "00 Audit: OS"
+  hosts: fleet
+  become: true
+  check_mode: true
+  diff: true
+  roles: [os_hardening]
+
+- name: "00 Audit: HAProxy headers"
+  hosts: haproxy_hosts
+  become: true
+  check_mode: true
+  diff: true
+  roles: [haproxy_headers]
+
+- name: "00 Audit: Tomcat"
+  hosts: tomcat_hosts
+  become: true
+  check_mode: true
+  diff: true
+  roles: [tomcat_hardening]
+
+- name: "00 Audit: Oracle"
+  hosts: oracle_hosts
+  become: true
+  check_mode: true
+  diff: true
+  roles: [oracle_hardening]
+
+- name: "00 Audit: PostgreSQL"
+  hosts: postgresql_hosts
+  become: true
+  check_mode: true
+  diff: true
+  roles: [postgresql_hardening]
+
+- name: "00 Audit: MySQL"
+  hosts: mysql_hosts
+  become: true
+  check_mode: true
+  diff: true
+  roles: [mysql_hardening]
+
+- name: "00 Audit: MongoDB"
+  hosts: mongodb_hosts
+  become: true
+  check_mode: true
+  roles: [mongodb_checks]

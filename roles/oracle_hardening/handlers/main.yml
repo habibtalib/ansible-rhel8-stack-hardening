@@ -1,0 +1,8 @@
+---
+# sqlnet.ora changes are read at each new connection; no database restart.
+# Application reconnect is a planned step outside this kit.
+- name: Sqlnet changed
+  ansible.builtin.debug:
+    msg: >-
+      sqlnet.ora changed on {{ inventory_hostname }}. New connections use it now;
+      existing sessions keep the old settings until the application reconnects.

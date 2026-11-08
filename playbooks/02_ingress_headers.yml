@@ -1,0 +1,14 @@
+---
+- name: "02 Ingress security headers (HAProxy)"
+  hosts: haproxy_hosts
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles: [haproxy_headers]
+
+- name: "02 Tomcat error page and AJP"
+  hosts: tomcat_hosts
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles: [tomcat_hardening]

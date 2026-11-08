@@ -1,0 +1,8 @@
+---
+# One host at a time; stop at the first failure.
+- name: "01 OS hardening"
+  hosts: fleet
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles: [os_hardening]

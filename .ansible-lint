@@ -1,0 +1,7 @@
+---
+profile: production
+skip_list:
+  - var-naming[no-role-prefix]   # short, readable role variable names by choice
+  - name[casing]
+exclude_paths:
+  - logs/

@@ -1,0 +1,19 @@
+---
+- name: "WEB-02 No AJP listener"
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -Hltn '( sport = :{{ tomcat_ajp_port }} )' | wc -l
+  args:
+    executable: /bin/bash
+  register: _ajp
+  changed_when: false
+  when: tomcat_disable_ajp | bool
+  failed_when: _ajp.stdout | trim != '0'
+
+- name: "WEB-01 404 page shows no version"
+  ansible.builtin.uri:
+    url: "{{ tomcat_health_url }}no-such-page-hardening-check"
+    status_code: 404
+    return_content: true
+  register: _404
+  failed_when: _404.content is search('Apache Tomcat/[0-9]')

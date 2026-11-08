@@ -1,0 +1,50 @@
+---
+# Restores files from the backups this kit writes. Run per host with --limit,
+# after reading docs/TESTING.md. Database statements to undo DDL are printed,
+# not run: execute them yourself after review.
+#
+#   ansible-playbook playbooks/99_rollback.yml --limit <host> -e rollback_confirm=true
+- name: "99 Rollback"
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    rollback_confirm: false
+    # file -> backup. Defaults cover the copy-once backups; files edited with
+    # `backup: true` leave <file>.<timestamp>~ next to them: add those here.
+    rollback_files:
+      - { path: "{{ tomcat_server_xml | default('/opt/tomcat/conf/server.xml') }}", backup: "{{ tomcat_server_xml | default('/opt/tomcat/conf/server.xml') }}.before-hardening" }
+    rollback_extra_files: []
+  tasks:
+    - name: "Confirm"
+      ansible.builtin.assert:
+        that: rollback_confirm | bool
+        fail_msg: "Pass -e rollback_confirm=true to restore files."
+
+    - name: "Backups present?"
+      ansible.builtin.stat:
+        path: "{{ item.backup }}"
+      loop: "{{ rollback_files + rollback_extra_files }}"
+      register: _bk
+
+    - name: "Restore"
+      ansible.builtin.copy:
+        src: "{{ item.item.backup }}"
+        dest: "{{ item.item.path }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ _bk.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      when: item.stat.exists
+
+    - name: "Database undo statements (run manually)"
+      ansible.builtin.debug:
+        msg:
+          - "Oracle (primary): ALTER PROFILE DEFAULT LIMIT PASSWORD_VERIFY_FUNCTION NULL;"
+          - "Oracle (primary): NOAUDIT POLICY <policy>;  GRANT <privilege> TO <schema>;"
+          - "PostgreSQL standalone: ALTER SYSTEM RESET <param>; SELECT pg_reload_conf();"
+          - "PostgreSQL Patroni: patronictl edit-config -s postgresql.parameters.<param>=null --force"
+          - "pg_hba: copy <hba_file>.before-hardening back, then pg_ctl reload"
+          - "MySQL: UNINSTALL COMPONENT 'file://component_validate_password';"
+          - "Then restart/reload the affected service in a window."

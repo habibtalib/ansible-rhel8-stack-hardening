@@ -1,0 +1,21 @@
+---
+haproxy_cfg: /etc/haproxy/haproxy.cfg
+# Name of the EXISTING frontend that serves the web UI. The kit inserts lines
+# inside it; it never creates a second frontend (HAProxy does not merge them).
+haproxy_frontend_name: https_in
+haproxy_probe_url: https://127.0.0.1/
+
+# ---- WEB-10 HSTS ----
+haproxy_hsts: true
+haproxy_hsts_value: "max-age=31536000; includeSubDomains"
+# ---- WEB-11 Basic defensive headers ----
+haproxy_basic_headers: true
+haproxy_frame_options: SAMEORIGIN
+# ---- WEB-12 Content-Security-Policy. Off by default: a wrong policy breaks the UI.
+haproxy_csp: false
+haproxy_csp_value: "default-src 'self'; frame-ancestors 'self'"
+# ---- WEB-13 Cookie flags ----
+haproxy_cookie_secure: true
+haproxy_cookie_httponly: true
+# Cookies that the page's JavaScript must read keep no HttpOnly (CSRF tokens).
+haproxy_httponly_exclude: [XSRF-TOKEN, CSRF-TOKEN]

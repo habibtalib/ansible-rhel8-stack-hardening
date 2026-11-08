@@ -1,0 +1,85 @@
+---
+- name: "MySQL admin password provided?"
+  ansible.builtin.assert:
+    that: mysql_admin_password | length > 0
+    fail_msg: "Set vault_mysql_root_password in an ansible-vault file."
+    quiet: true
+  when: mysql_validate_password | bool
+
+- name: "DB-20 Is validate_password installed?"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -e
+      - "MYSQL_PWD={{ mysql_admin_password }}"
+      - "{{ mysql_container }}"
+      - mysql
+      - -u{{ mysql_admin_user }}
+      - -N
+      - -e
+      - "select count(*) from mysql.component where component_urn='file://component_validate_password'"
+  register: _my_vp
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: mysql_validate_password | bool
+
+- name: "DB-20 Install validate_password component"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -e
+      - "MYSQL_PWD={{ mysql_admin_password }}"
+      - "{{ mysql_container }}"
+      - mysql
+      - -u{{ mysql_admin_user }}
+      - -e
+      - "INSTALL COMPONENT 'file://component_validate_password'"
+  no_log: true
+  changed_when: true
+  when:
+    - mysql_validate_password | bool
+    - _my_vp.stdout | default('1') | trim == '0'
+
+- name: "DB-20 Persist policy and length"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -e
+      - "MYSQL_PWD={{ mysql_admin_password }}"
+      - "{{ mysql_container }}"
+      - mysql
+      - -u{{ mysql_admin_user }}
+      - -N
+      - -e
+      - >-
+        select @@validate_password.policy, @@validate_password.length;
+  register: _my_vp_cur
+  no_log: true
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: mysql_validate_password | bool
+
+- name: "DB-20 Set policy and length"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -e
+      - "MYSQL_PWD={{ mysql_admin_password }}"
+      - "{{ mysql_container }}"
+      - mysql
+      - -u{{ mysql_admin_user }}
+      - -e
+      - >-
+        SET PERSIST validate_password.policy = {{ mysql_validate_password_policy }};
+        SET PERSIST validate_password.length = {{ mysql_validate_password_length }};
+  no_log: true
+  changed_when: true
+  when:
+    - mysql_validate_password | bool
+    - (_my_vp_cur.stdout | default('') | split('\t')) != [mysql_validate_password_policy, mysql_validate_password_length | string]

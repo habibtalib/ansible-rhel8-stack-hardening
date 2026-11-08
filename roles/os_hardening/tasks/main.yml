@@ -1,0 +1,229 @@
+---
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+# OS-01 ---------------------------------------------------------------------
+- name: "OS-01 Blacklist unused kernel modules"
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/hardening-blacklist.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    content: |
+      # Managed by ansible-rhel8-stack-hardening (OS-01)
+      {% for m in os_blacklist_modules + (['sctp'] if os_blacklist_sctp | bool else []) %}
+      install {{ m }} /bin/true
+      blacklist {{ m }}
+      {% endfor %}
+
+- name: "OS-01 Unload blacklisted modules now (optional)"
+  community.general.modprobe:
+    name: "{{ item | replace('-', '_') }}"
+    state: absent
+  loop: "{{ os_blacklist_modules }}"
+  when: os_unload_modules | bool
+  failed_when: false
+
+# OS-02 / OS-03 ---------------------------------------------------------------
+- name: "OS-02 Kernel sysctl"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+    reload: true
+  loop: "{{ os_sysctl | dict2items }}"
+
+- name: "OS-03 IPv4 forwarding off (not on Docker hosts)"
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "0"
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+    reload: true
+  loop: [net.ipv4.ip_forward, net.ipv4.conf.all.forwarding, net.ipv4.conf.default.forwarding]
+  when:
+    - os_disable_ip_forward | bool
+    - not (docker_host | bool)
+
+# OS-04 ----------------------------------------------------------------------
+- name: "OS-04 Find repo files"
+  ansible.builtin.find:
+    paths: /etc/yum.repos.d
+    patterns: "*.repo"
+  register: _repo_files
+  when: os_enforce_gpgcheck | bool
+
+- name: "OS-04 gpgcheck=1 (exempt files skipped)"
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^gpgcheck\s*=\s*0\s*$'
+    replace: "gpgcheck=1"
+    backup: true
+  loop: "{{ _repo_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - os_enforce_gpgcheck | bool
+    - (item.path | basename) not in os_gpgcheck_exempt_files
+
+# OS-05 ----------------------------------------------------------------------
+- name: "OS-05 Stop and disable unused services (only if installed)"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ os_disable_services }}"
+  when: (item ~ '.service') in ansible_facts.services
+
+- name: "OS-05 rpcbind: stop and mask service and socket (opt-in per host)"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: [rpcbind.socket, rpcbind.service]
+  when:
+    - rpcbind_disable | bool
+    - "'rpcbind.service' in ansible_facts.services"
+
+# OS-06 ----------------------------------------------------------------------
+- name: "OS-06 Allow at/cron for root only"
+  ansible.builtin.copy:
+    dest: "/etc/{{ item }}.allow"
+    content: "root\n"
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  loop: [at, cron]
+  when: os_restrict_at_cron | bool
+
+- name: "OS-06 Remove at.deny / cron.deny"
+  ansible.builtin.file:
+    path: "/etc/{{ item }}.deny"
+    state: absent
+  loop: [at, cron]
+  when: os_restrict_at_cron | bool
+
+# OS-07 ----------------------------------------------------------------------
+- name: "OS-07 pwquality"
+  ansible.builtin.lineinfile:
+    path: /etc/security/pwquality.conf
+    regexp: '^#?\s*{{ item.key }}\s*='
+    line: "{{ item.key }} = {{ item.value }}"
+    backup: true
+  loop: "{{ os_pwquality | dict2items }}"
+
+- name: "OS-07 login.defs ageing for new accounts"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^{{ item.key }}\s'
+    line: "{{ item.key }}   {{ item.value }}"
+    backup: true
+  loop:
+    - { key: PASS_MAX_DAYS, value: "{{ os_pass_max_days }}" }
+    - { key: PASS_WARN_AGE, value: "{{ os_pass_warn_age }}" }
+
+- name: "OS-07 Read current ageing of listed users"
+  ansible.builtin.command: "chage -l {{ item }}"
+  loop: "{{ os_chage_users }}"
+  register: _chage
+  changed_when: false
+  check_mode: false
+
+- name: "OS-07 Apply ageing to listed users"
+  ansible.builtin.command: "chage -M {{ os_pass_max_days }} -W {{ os_pass_warn_age }} {{ item.item }}"
+  loop: "{{ _chage.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: >-
+    (item.stdout | regex_findall('Maximum number of days between password change\s*:\s*(\d+)') | first | default('-1')) != (os_pass_max_days | string)
+  changed_when: true
+
+# OS-08 ----------------------------------------------------------------------
+- name: "OS-08 SSH DenyUsers"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^\s*DenyUsers\s'
+    line: "DenyUsers {{ os_ssh_deny_users | join(' ') }}"
+    insertbefore: '^Match\s'
+    validate: /usr/sbin/sshd -t -f %s
+    backup: true
+  when: os_ssh_deny_users | length > 0
+  notify: Reload sshd
+
+# OS-09 ----------------------------------------------------------------------
+- name: "OS-09 rsyslog file create mode"
+  ansible.builtin.lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^\$FileCreateMode'
+    line: "$FileCreateMode {{ os_rsyslog_file_create_mode }}"
+    insertafter: '^#### GLOBAL DIRECTIVES ####'
+    validate: /usr/sbin/rsyslogd -N1 -f %s
+    backup: true
+  notify: Restart rsyslog
+
+- name: "OS-09 AIDE installed"
+  ansible.builtin.dnf:
+    name: aide
+    state: present
+  when: os_install_aide | bool
+
+- name: "OS-09 systemd-journal-remote installed"
+  ansible.builtin.dnf:
+    name: systemd-journal-remote
+    state: present
+  when: os_install_journal_remote | bool
+
+- name: "OS-09 journal-upload target"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journal-upload.conf
+    regexp: '^#?URL='
+    line: "URL={{ os_journal_upload_url }}"
+    backup: true
+  when:
+    - os_install_journal_remote | bool
+    - os_journal_upload_url | length > 0
+
+# OS-10 ----------------------------------------------------------------------
+- name: "OS-10 List unowned files in named paths"
+  ansible.builtin.command:
+    argv: [find, "{{ item }}", -xdev, (, -nouser, -o, -nogroup, ), -print]
+  loop: "{{ os_unowned_fix_paths }}"
+  register: _unowned
+  changed_when: false
+  check_mode: false
+
+- name: "OS-10 Set owner on unowned files in named paths"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ os_unowned_owner }}"
+    group: "{{ os_unowned_group }}"
+  loop: "{{ _unowned.results | map(attribute='stdout_lines') | flatten }}"
+
+# OS-11 ----------------------------------------------------------------------
+- name: "OS-11 Block ICMP timestamp (firewalld)"
+  ansible.posix.firewalld:
+    icmp_block: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: [timestamp-request, timestamp-reply]
+  when:
+    - os_block_icmp_timestamp | bool
+    - os_firewall_backend == 'firewalld'
+
+- name: "OS-11 Block ICMP timestamp (iptables)"
+  ansible.builtin.iptables:
+    chain: "{{ item.chain }}"
+    protocol: icmp
+    icmp_type: "{{ item.type }}"
+    jump: DROP
+    action: insert
+  loop:
+    - { chain: INPUT, type: timestamp-request }
+    - { chain: OUTPUT, type: timestamp-reply }
+  when:
+    - os_block_icmp_timestamp | bool
+    - os_firewall_backend == 'iptables'
+  notify: Save iptables

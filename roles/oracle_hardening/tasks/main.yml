@@ -1,0 +1,168 @@
+---
+# Read-only facts first (run in check mode too), then changes only where the
+# current value differs. DDL runs on the PRIMARY only; a physical standby gets
+# it through redo. sqlnet.ora is a file on each host and is applied on both.
+
+- name: "Oracle facts (role, parameters, profile, audit, privileges)"
+  ansible.builtin.shell: |
+    set -o pipefail
+    "$ORACLE_HOME/bin/sqlplus" -S -L / as sysdba <<'SQLEOF'
+    whenever sqlerror exit failure
+    set heading off feedback off pagesize 0 linesize 400 trimspool on
+    select 'ROLE='||database_role from v$database;
+    select 'TRACE='||upper(value) from v$parameter where name='sec_protocol_error_trace_action';
+    select 'VERIFY='||limit from dba_profiles
+      where profile='{{ oracle_password_verify_profile }}' and resource_name='PASSWORD_VERIFY_FUNCTION';
+    select 'AUDIT='||policy_name from audit_unified_enabled_policies;
+    select 'PRIV='||grantee||':'||privilege from dba_sys_privs
+      where privilege like '%SYNONYM%' or privilege like '% ANY %';
+    exit
+    SQLEOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  environment: "{{ _ora_env }}"
+  register: _ora_facts
+  changed_when: false
+  check_mode: false
+
+- name: "Oracle facts: parse"
+  ansible.builtin.set_fact:
+    _ora_role: "{{ _ora_facts.stdout_lines | select('match', '^ROLE=') | map('regex_replace', '^ROLE=', '') | first | default('UNKNOWN') }}"
+    _ora_trace: "{{ _ora_facts.stdout_lines | select('match', '^TRACE=') | map('regex_replace', '^TRACE=', '') | first | default('') }}"
+    _ora_verify: "{{ _ora_facts.stdout_lines | select('match', '^VERIFY=') | map('regex_replace', '^VERIFY=', '') | first | default('') }}"
+    _ora_audit: "{{ _ora_facts.stdout_lines | select('match', '^AUDIT=') | map('regex_replace', '^AUDIT=', '') | list }}"
+    _ora_privs: "{{ _ora_facts.stdout_lines | select('match', '^PRIV=') | map('regex_replace', '^PRIV=', '') | list }}"
+
+- name: "Oracle facts: show"
+  ansible.builtin.debug:
+    msg: "role={{ _ora_role }} trace={{ _ora_trace }} verify={{ _ora_verify }} audit={{ _ora_audit | join(',') }}"
+
+# DB-01 / DB-02 sqlnet.ora ------------------------------------------------------
+- name: "DB-01/02 sqlnet.ora hardening block"
+  ansible.builtin.blockinfile:
+    path: "{{ oracle_home }}/network/admin/sqlnet.ora"
+    marker: "# {mark} ansible-rhel8-stack-hardening"
+    create: true
+    owner: "{{ oracle_os_user }}"
+    mode: "0644"
+    backup: true
+    block: |
+      {% if oracle_sqlnet_encryption | bool %}
+      {% for k, v in oracle_sqlnet_settings.items() %}
+      {{ k }} = {{ v }}
+      {% endfor %}
+      {% endif %}
+      {% if oracle_sqlnet_logon_version | bool %}
+      SQLNET.ALLOWED_LOGON_VERSION_SERVER = {{ oracle_sqlnet_logon_version_value }}
+      SQLNET.ALLOWED_LOGON_VERSION_CLIENT = {{ oracle_sqlnet_logon_version_value }}
+      {% endif %}
+      {% if oracle_sqlnet_reject_weak_certs | bool %}
+      ACCEPT_MD5_CERTS = FALSE
+      ACCEPT_SHA1_CERTS = FALSE
+      {% endif %}
+  when: oracle_sqlnet_encryption | bool or oracle_sqlnet_logon_version | bool or oracle_sqlnet_reject_weak_certs | bool
+  notify: Sqlnet changed
+
+- name: "DB-01 Duplicate sqlnet keys outside the managed block"
+  ansible.builtin.shell: |
+    set -o pipefail
+    awk '/# BEGIN ansible-rhel8-stack-hardening/{s=1} /# END ansible-rhel8-stack-hardening/{s=0;next} !s' \
+      "{{ oracle_home }}/network/admin/sqlnet.ora" \
+      | grep -iE '^\s*(SQLNET\.(ENCRYPTION|CRYPTO_CHECKSUM|ALLOWED_LOGON)|ACCEPT_(MD5|SHA1)_CERTS)' || true
+  args:
+    executable: /bin/bash
+  register: _sqlnet_dupes
+  changed_when: false
+  check_mode: false
+  failed_when: _sqlnet_dupes.stdout | length > 0
+
+# DDL (primary only) -----------------------------------------------------------
+- name: "DDL on primary only"
+  when: _ora_role == 'PRIMARY'
+  block:
+    - name: "DB-03 Password verify function"
+      ansible.builtin.shell: |
+        set -o pipefail
+        "$ORACLE_HOME/bin/sqlplus" -S -L / as sysdba <<'SQLEOF'
+        whenever sqlerror exit failure
+        alter profile {{ oracle_password_verify_profile }} limit password_verify_function {{ oracle_password_verify_function }};
+        exit
+        SQLEOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ oracle_os_user }}"
+      environment: "{{ _ora_env }}"
+      when:
+        - oracle_password_verify | bool
+        - _ora_verify | upper != oracle_password_verify_function | upper
+      changed_when: true
+
+    - name: "DB-04 SEC_PROTOCOL_ERROR_TRACE_ACTION"
+      ansible.builtin.shell: |
+        set -o pipefail
+        "$ORACLE_HOME/bin/sqlplus" -S -L / as sysdba <<'SQLEOF'
+        whenever sqlerror exit failure
+        alter system set sec_protocol_error_trace_action={{ oracle_sec_protocol_error_trace_action }} scope=both;
+        exit
+        SQLEOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ oracle_os_user }}"
+      environment: "{{ _ora_env }}"
+      when: _ora_trace != oracle_sec_protocol_error_trace_action | upper
+      changed_when: true
+
+    - name: "DB-05 Enable unified audit policies"
+      ansible.builtin.shell: |
+        set -o pipefail
+        "$ORACLE_HOME/bin/sqlplus" -S -L / as sysdba <<'SQLEOF'
+        whenever sqlerror exit failure
+        audit policy {{ item }};
+        exit
+        SQLEOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ oracle_os_user }}"
+      environment: "{{ _ora_env }}"
+      loop: "{{ oracle_audit_policies }}"
+      when: item not in _ora_audit
+      changed_when: true
+
+    - name: "DB-06 Revoke ANY / PUBLIC synonym privileges"
+      ansible.builtin.shell: |
+        set -o pipefail
+        "$ORACLE_HOME/bin/sqlplus" -S -L / as sysdba <<'SQLEOF'
+        whenever sqlerror exit failure
+        revoke {{ item.privilege }} from {{ item.grantee }};
+        exit
+        SQLEOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ oracle_os_user }}"
+      environment: "{{ _ora_env }}"
+      loop: "{{ oracle_revoke_privileges }}"
+      loop_control:
+        label: "{{ item.grantee }} {{ item.privilege }}"
+      when: (item.grantee | upper ~ ':' ~ item.privilege | upper) in _ora_privs
+      changed_when: true
+
+- name: "Standby: DDL skipped"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} is {{ _ora_role }}; DDL arrives by redo from the primary."
+  when: _ora_role != 'PRIMARY'
+
+# DB-07 -------------------------------------------------------------------------
+- name: "DB-07 Restrict files holding DB credentials"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode | default('0640') }}"
+    group: "{{ item.group | default(omit) }}"
+  loop: "{{ oracle_secret_files }}"
+  loop_control:
+    label: "{{ item.path }}"

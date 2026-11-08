@@ -1,0 +1,63 @@
+---
+# ---- OS-01 Unused kernel modules (CIS 1.1.1.x, 3.2.x) ----
+os_blacklist_modules: [firewire-core, atm, can, cramfs, squashfs, udf]
+# SCTP is NOT in the list on purpose: telecom signalling (e.g. SBc-AP to the core)
+# runs over SCTP. Set true only on hosts that have no SCTP peers.
+os_blacklist_sctp: false
+os_unload_modules: false            # rmmod at runtime (else takes effect at reboot)
+
+# ---- OS-02 Kernel sysctl (CIS 1.5.x, 3.x) ----
+os_sysctl:
+  kernel.dmesg_restrict: 1
+  kernel.kptr_restrict: 2
+  kernel.yama.ptrace_scope: 1
+# OS-03 IPv4 forwarding off. Skipped automatically where docker_host is true.
+os_disable_ip_forward: true
+
+# ---- OS-04 Package signature check (CIS 1.2.x) ----
+os_enforce_gpgcheck: true
+# Repo files to leave alone, e.g. a local repo serving unsigned vendor RPMs.
+os_gpgcheck_exempt_files: []        # e.g. ["local-vendor.repo"]
+
+# ---- OS-05 Unused network services (CIS 2.2.x) ----
+os_disable_services: [dnsmasq, nfs-server]
+# rpcbind: only where nothing depends on it (check `systemctl list-dependencies
+# --reverse rpcbind.service` first). Stops and MASKS service + socket.
+rpcbind_disable: false
+
+# ---- OS-06 at/cron access (CIS 5.1.x) ----
+os_restrict_at_cron: true
+
+# ---- OS-07 Password quality and ageing (CIS 5.4.x, 5.5.x) ----
+os_pwquality:
+  minlen: 14
+  dcredit: -1
+  ucredit: -1
+  lcredit: -1
+  ocredit: -1
+  maxsequence: 3
+os_pass_max_days: 90
+os_pass_warn_age: 7
+# Existing human accounts to apply ageing to with chage. Never list service
+# accounts that log in with a password used by an application.
+os_chage_users: []
+
+# ---- OS-08 SSH DenyUsers for service accounts (CIS 5.2.x) ----
+os_ssh_deny_users: []               # e.g. [tomcat, prometheus]
+
+# ---- OS-09 Logging (CIS 4.2.x) ----
+os_rsyslog_file_create_mode: "0640"
+os_install_aide: false              # needs a reachable repo or local RPMs
+os_install_journal_remote: false
+os_journal_upload_url: ""           # enable upload only when a log server exists
+
+# ---- OS-10 Unowned / ungrouped files (CIS 6.1.x) ----
+# Named paths only. The root filesystem is never walked: container layers and
+# volume data legitimately use UIDs that have no local account.
+os_unowned_fix_paths: []            # e.g. ["/opt/staging"]
+os_unowned_owner: root
+os_unowned_group: root
+
+# ---- OS-11 ICMP timestamp (VA finding, CVE-1999-0524) ----
+os_block_icmp_timestamp: false
+os_firewall_backend: firewalld      # firewalld | iptables

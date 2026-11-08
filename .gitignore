@@ -1,0 +1,11 @@
+# Real inventories, host vars and vaults stay out of git.
+inventories/*
+!inventories/example.ini
+host_vars/
+group_vars/*vault*
+*.vault.yml
+*.retry
+logs/
+*.log
+.vault_pass*
+!inventories/group_vars

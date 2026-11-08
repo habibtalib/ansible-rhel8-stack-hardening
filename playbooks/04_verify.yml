@@ -1,0 +1,33 @@
+---
+# Read-only assertions on the live state. Fails a host on the first miss.
+# Runs each role's tasks/verify.yml, so role defaults and inventory overrides apply.
+
+- name: "04 Verify OS"
+  hosts: fleet
+  become: true
+  gather_facts: false
+  tasks:
+    - name: "Verify os_hardening"
+      ansible.builtin.include_role:
+        name: os_hardening
+        tasks_from: verify
+
+- name: "04 Verify PostgreSQL"
+  hosts: postgresql_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: "Verify postgresql_hardening"
+      ansible.builtin.include_role:
+        name: postgresql_hardening
+        tasks_from: verify
+
+- name: "04 Verify Tomcat"
+  hosts: tomcat_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: "Verify tomcat_hardening"
+      ansible.builtin.include_role:
+        name: tomcat_hardening
+        tasks_from: verify

@@ -1,0 +1,58 @@
+---
+- name: "OS-01 Blacklisted modules resolve to /bin/true"
+  ansible.builtin.command:
+    argv: [modprobe, -n, -v, "{{ item }}"]
+  loop: "{{ os_blacklist_modules }}"
+  register: _mp
+  changed_when: false
+  failed_when: "'/bin/true' not in (_mp.stdout ~ _mp.stderr)"
+
+- name: "OS-01 sctp NOT blacklisted unless asked"
+  ansible.builtin.command:
+    argv: [modprobe, -n, -v, sctp]
+  register: _sctp
+  changed_when: false
+  failed_when: (not (os_blacklist_sctp | bool)) and ('/bin/true' in _sctp.stdout)
+
+- name: "OS-02 sysctl runtime values"
+  ansible.builtin.command:
+    argv: [sysctl, -n, "{{ item.key }}"]
+  loop: "{{ os_sysctl | dict2items }}"
+  register: _sc
+  changed_when: false
+  failed_when: _sc.stdout | trim != item.value | string
+
+- name: "OS-03 IPv4 forwarding (0 except Docker hosts)"
+  ansible.builtin.command:
+    argv: [sysctl, -n, net.ipv4.ip_forward]
+  register: _fwd
+  changed_when: false
+  failed_when: >-
+    (os_disable_ip_forward | bool and not (docker_host | bool) and _fwd.stdout | trim != '0')
+    or (docker_host | bool and _fwd.stdout | trim != '1')
+
+- name: "OS-05 Services stopped (exact is-active match)"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ item }}"]
+  loop: "{{ os_disable_services + (['rpcbind.service', 'rpcbind.socket'] if rpcbind_disable | bool else []) }}"
+  register: _svc
+  changed_when: false
+  failed_when: (_svc.stdout | trim) not in ['inactive', 'unknown', 'failed']
+
+- name: "OS-07 PASS_MAX_DAYS"
+  ansible.builtin.command:
+    argv: [awk, '$1=="PASS_MAX_DAYS"{print $2}', /etc/login.defs]
+  register: _pmd
+  changed_when: false
+  failed_when: _pmd.stdout | trim != os_pass_max_days | string
+
+- name: "OS-08 sshd DenyUsers effective"
+  ansible.builtin.shell: |
+    set -o pipefail
+    sshd -T | awk '$1=="denyusers"{print $2}'
+  args:
+    executable: /bin/bash
+  register: _deny
+  changed_when: false
+  when: os_ssh_deny_users | length > 0
+  failed_when: (os_ssh_deny_users | difference(_deny.stdout_lines)) | length > 0

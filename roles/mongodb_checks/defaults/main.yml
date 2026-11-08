@@ -1,0 +1,7 @@
+---
+# MongoDB Community in Docker. This role reports; it changes only data-dir mode.
+mongodb_container: mongo
+mongodb_port: 27017
+# Host directories bind-mounted as MongoDB data. Mode is tightened only here.
+mongodb_data_dirs: []               # e.g. ["/srv/app/mongo_data"]
+mongodb_data_dir_mode: "0750"
